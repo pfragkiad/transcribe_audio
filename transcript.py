@@ -1,7 +1,17 @@
-
 import argparse
+import os
+import sys
 import time
 from pathlib import Path
+
+# Make NVIDIA libraries installed in this virtual environment visible on Windows.
+# Keep the handles alive so Windows retains the DLL search directories.
+_cuda_dll_handles = []
+if sys.platform == "win32":
+    _nvidia_dir = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
+    for _dll_dir in sorted(_nvidia_dir.glob("*/bin")):
+        os.environ["PATH"] = str(_dll_dir) + os.pathsep + os.environ.get("PATH", "")
+        _cuda_dll_handles.append(os.add_dll_directory(str(_dll_dir)))
 
 import ctranslate2
 from faster_whisper import WhisperModel
@@ -47,10 +57,7 @@ def srt_timestamp(seconds: float) -> str:
     minutes, milliseconds = divmod(milliseconds, 60000)
     secs, milliseconds = divmod(milliseconds, 1000)
 
-    return (
-        f"{hours:02}:{minutes:02}:{secs:02},"
-        f"{milliseconds:03}"
-    )
+    return f"{hours:02}:{minutes:02}:{secs:02}," f"{milliseconds:03}"
 
 
 def transcribe(model, input_file: Path, mode: str):
@@ -64,16 +71,20 @@ def transcribe(model, input_file: Path, mode: str):
     }
 
     if mode == "mixed":
-        options.update({
-            "language": None,
-            "multilingual": True,
-        })
+        options.update(
+            {
+                "language": None,
+                "multilingual": True,
+            }
+        )
 
     elif mode == "chinese":
-        options.update({
-            "language": "zh",
-            "multilingual": False,
-        })
+        options.update(
+            {
+                "language": "zh",
+                "multilingual": False,
+            }
+        )
 
     else:
         raise ValueError(f"Unknown mode: {mode}")
@@ -103,15 +114,9 @@ def save_results(input_file, mode, segments):
             if not content:
                 continue
 
-            print(
-                f"[{segment.start:7.2f} - "
-                f"{segment.end:7.2f}] {content}"
-            )
+            print(f"[{segment.start:7.2f} - " f"{segment.end:7.2f}] {content}")
 
-            txt.write(
-                f"[{segment.start:.2f} - "
-                f"{segment.end:.2f}] {content}\n"
-            )
+            txt.write(f"[{segment.start:.2f} - " f"{segment.end:.2f}] {content}\n")
 
             srt.write(
                 f"{index}\n"
@@ -124,9 +129,7 @@ def save_results(input_file, mode, segments):
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description="Mandarin/English transcription"
-    )
+    parser = argparse.ArgumentParser(description="Mandarin/English transcription")
 
     parser.add_argument(
         "input_file",
@@ -155,9 +158,7 @@ def main():
     args = parser.parse_args()
 
     if not args.input_file.is_file():
-        parser.error(
-            f"Input file not found: {args.input_file}"
-        )
+        parser.error(f"Input file not found: {args.input_file}")
 
     device, compute_type = select_device(args.device)
 
@@ -191,11 +192,7 @@ def main():
             compute_type=compute_type,
         )
 
-    modes = (
-        ["mixed", "chinese"]
-        if args.mode == "both"
-        else [args.mode]
-    )
+    modes = ["mixed", "chinese"] if args.mode == "both" else [args.mode]
 
     for mode in modes:
         print(f"\n{'=' * 60}")
@@ -205,9 +202,7 @@ def main():
         start = time.perf_counter()
 
         try:
-            segments, info = transcribe(
-                model, args.input_file, mode
-            )
+            segments, info = transcribe(model, args.input_file, mode)
 
         except (RuntimeError, OSError) as exc:
             if device != "cuda" or args.device == "cuda":
@@ -225,15 +220,11 @@ def main():
                 compute_type=compute_type,
             )
 
-            segments, info = transcribe(
-                model, args.input_file, mode
-            )
+            segments, info = transcribe(model, args.input_file, mode)
 
         elapsed = time.perf_counter() - start
 
-        txt_path, srt_path = save_results(
-            args.input_file, mode, segments
-        )
+        txt_path, srt_path = save_results(args.input_file, mode, segments)
 
         print(f"\nDetected language: {info.language}")
         print(f"Audio duration: {info.duration:.2f} s")
@@ -241,10 +232,7 @@ def main():
         print(f"Device used: {device}")
 
         if elapsed > 0:
-            print(
-                f"Speed ratio: "
-                f"{info.duration / elapsed:.2f}x realtime"
-            )
+            print(f"Speed ratio: " f"{info.duration / elapsed:.2f}x realtime")
 
         print(f"TXT output: {txt_path}")
         print(f"SRT output: {srt_path}")

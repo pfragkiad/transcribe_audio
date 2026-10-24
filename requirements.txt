@@ -1,9 +1,10 @@
 anyio==4.15.1
 ast_serialize==0.13.1
-av==19.0.1
+av<19
 click==8.5.0
 colorama==0.4.6
 ctranslate2==4.8.3
+nvidia-cublas-cu12==12.9.2.10; sys_platform == "win32"
 faster-whisper==1.2.1
 filelock==4.2.4
 flatbuffers==25.12.19

@@ -1,134 +1,19 @@
+"""Mandarin/English transcription CLI and main workflow."""
+
 import argparse
-import os
-import sys
 import time
 from pathlib import Path
 
-# Make NVIDIA libraries installed in this virtual environment visible on Windows.
-# Keep the handles alive so Windows retains the DLL search directories.
-_cuda_dll_handles = []
-if sys.platform == "win32":
-    _nvidia_dir = Path(sys.prefix) / "Lib" / "site-packages" / "nvidia"
-    for _dll_dir in sorted(_nvidia_dir.glob("*/bin")):
-        os.environ["PATH"] = str(_dll_dir) + os.pathsep + os.environ.get("PATH", "")
-        _cuda_dll_handles.append(os.add_dll_directory(str(_dll_dir)))
-
-import ctranslate2
-from faster_whisper import WhisperModel
-
-
-def select_device(preference: str):
-    """Select CUDA if available, otherwise CPU."""
-    if preference == "cpu":
-        return "cpu", "int8"
-
-    try:
-        count = ctranslate2.get_cuda_device_count()
-        if count < 1:
-            raise RuntimeError("No CUDA device detected")
-
-        types = ctranslate2.get_supported_compute_types("cuda")
-
-        if "float16" in types:
-            compute_type = "float16"
-        elif "int8_float16" in types:
-            compute_type = "int8_float16"
-        elif "float32" in types:
-            compute_type = "float32"
-        else:
-            raise RuntimeError("No suitable CUDA compute type")
-
-        print(f"CUDA devices: {count}")
-        print(f"CUDA compute types: {sorted(types)}")
-        return "cuda", compute_type
-
-    except (RuntimeError, OSError) as exc:
-        if preference == "cuda":
-            raise
-
-        print(f"CUDA unavailable: {exc}")
-        print("Falling back to CPU.")
-        return "cpu", "int8"
-
-
-def srt_timestamp(seconds: float) -> str:
-    milliseconds = round(seconds * 1000)
-    hours, milliseconds = divmod(milliseconds, 3600000)
-    minutes, milliseconds = divmod(milliseconds, 60000)
-    secs, milliseconds = divmod(milliseconds, 1000)
-
-    return f"{hours:02}:{minutes:02}:{secs:02}," f"{milliseconds:03}"
-
-
-def transcribe(model, input_file: Path, mode: str):
-    """Run transcription and fully consume its lazy generator."""
-
-    options = {
-        "task": "transcribe",
-        "beam_size": 5,
-        "vad_filter": True,
-        "condition_on_previous_text": False,
-    }
-
-    if mode == "mixed":
-        options.update(
-            {
-                "language": None,
-                "multilingual": True,
-            }
-        )
-
-    elif mode == "chinese":
-        options.update(
-            {
-                "language": "zh",
-                "multilingual": False,
-            }
-        )
-
-    else:
-        raise ValueError(f"Unknown mode: {mode}")
-
-    segments, info = model.transcribe(
-        str(input_file),
-        **options,
-    )
-
-    return list(segments), info
-
-
-def save_results(input_file, mode, segments):
-    """Write UTF-8 text and SRT subtitle files."""
-
-    stem = input_file.with_suffix("")
-    txt_path = Path(f"{stem}.{mode}.txt")
-    srt_path = Path(f"{stem}.{mode}.srt")
-
-    with (
-        txt_path.open("w", encoding="utf-8") as txt,
-        srt_path.open("w", encoding="utf-8") as srt,
-    ):
-        for index, segment in enumerate(segments, 1):
-            content = segment.text.strip()
-
-            if not content:
-                continue
-
-            print(f"[{segment.start:7.2f} - " f"{segment.end:7.2f}] {content}")
-
-            txt.write(f"[{segment.start:.2f} - " f"{segment.end:.2f}] {content}\n")
-
-            srt.write(
-                f"{index}\n"
-                f"{srt_timestamp(segment.start)} --> "
-                f"{srt_timestamp(segment.end)}\n"
-                f"{content}\n\n"
-            )
-
-    return txt_path, srt_path
+from mandarin_transcript.device import select_device
+from mandarin_transcript.output import save_results
+from mandarin_transcript.pinyin import annotate_hanzi, hanzi_to_pinyin
+from mandarin_transcript.runtime import configure_utf8_stdio
+from mandarin_transcript.transcription import load_model, transcribe
 
 
 def main():
+    configure_utf8_stdio()
+
     parser = argparse.ArgumentParser(description="Mandarin/English transcription")
 
     parser.add_argument(
@@ -151,14 +36,39 @@ def main():
 
     parser.add_argument(
         "--mode",
-        choices=["mixed", "chinese", "both"],
-        default="both",
+        choices=["mixed", "chinese"],
+        default="mixed",
     )
+
+    parser.add_argument(
+        "--pinyin",
+        action="store_true",
+        help="Annotate Chinese words with Pinyin in the single output file",
+    )
+
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=Path("output"),
+        help="Root directory for organized output files (default: output)",
+    )
+
+    parser.add_argument("--format", choices=["txt", "srt"], default="txt",
+                        help="Single output format (default: txt)")
 
     args = parser.parse_args()
 
     if not args.input_file.is_file():
         parser.error(f"Input file not found: {args.input_file}")
+
+    if args.pinyin:
+        try:
+            hanzi_to_pinyin("")
+            annotate_hanzi("")
+        except ModuleNotFoundError as exc:
+            if exc.name not in {"pypinyin", "jieba"}:
+                raise
+            parser.error("Pinyin support requires pypinyin and jieba: pip install -r requirements.txt")
 
     device, compute_type = select_device(args.device)
 
@@ -170,9 +80,9 @@ def main():
 
     start_total = time.perf_counter()
 
-    # Load model once and reuse it for both passes.
+    # Load the model for the selected transcription pass.
     try:
-        model = WhisperModel(
+        model = load_model(
             args.model,
             device=device,
             compute_type=compute_type,
@@ -186,56 +96,57 @@ def main():
         print("Loading model on CPU...")
 
         device, compute_type = "cpu", "int8"
-        model = WhisperModel(
+        model = load_model(
             args.model,
             device=device,
             compute_type=compute_type,
         )
 
-    modes = ["mixed", "chinese"] if args.mode == "both" else [args.mode]
+    print(f"\n{'=' * 60}")
+    print(f"TRANSCRIPTION MODE: {args.mode.upper()}")
+    print(f"{'=' * 60}")
 
-    for mode in modes:
-        print(f"\n{'=' * 60}")
-        print(f"TRANSCRIPTION MODE: {mode.upper()}")
-        print(f"{'=' * 60}")
+    start = time.perf_counter()
 
-        start = time.perf_counter()
+    try:
+        segments, info = transcribe(model, args.input_file, args.mode)
 
-        try:
-            segments, info = transcribe(model, args.input_file, mode)
+    except (RuntimeError, OSError) as exc:
+        if device != "cuda" or args.device == "cuda":
+            raise
 
-        except (RuntimeError, OSError) as exc:
-            if device != "cuda" or args.device == "cuda":
-                raise
+        print(f"CUDA inference failed: {exc}")
+        print("Retrying on CPU...")
 
-            print(f"CUDA inference failed: {exc}")
-            print("Retrying on CPU...")
+        del model
+        device, compute_type = "cpu", "int8"
 
-            del model
-            device, compute_type = "cpu", "int8"
+        model = load_model(
+            args.model,
+            device=device,
+            compute_type=compute_type,
+        )
 
-            model = WhisperModel(
-                args.model,
-                device=device,
-                compute_type=compute_type,
-            )
+        segments, info = transcribe(model, args.input_file, args.mode)
 
-            segments, info = transcribe(model, args.input_file, mode)
+    elapsed = time.perf_counter() - start
 
-        elapsed = time.perf_counter() - start
+    output_path = save_results(
+        args.input_file, args.mode, segments,
+        output_dir=args.output_dir,
+        output_format=args.format,
+        text_transform=annotate_hanzi if args.pinyin else None,
+    )
 
-        txt_path, srt_path = save_results(args.input_file, mode, segments)
+    print(f"\nDetected language: {info.language}")
+    print(f"Audio duration: {info.duration:.2f} s")
+    print(f"Processing time: {elapsed:.2f} s")
+    print(f"Device used: {device}")
 
-        print(f"\nDetected language: {info.language}")
-        print(f"Audio duration: {info.duration:.2f} s")
-        print(f"Processing time: {elapsed:.2f} s")
-        print(f"Device used: {device}")
+    if elapsed > 0:
+        print(f"Speed ratio: " f"{info.duration / elapsed:.2f}x realtime")
 
-        if elapsed > 0:
-            print(f"Speed ratio: " f"{info.duration / elapsed:.2f}x realtime")
-
-        print(f"TXT output: {txt_path}")
-        print(f"SRT output: {srt_path}")
+    print(f"Output: {output_path}")
 
     total_elapsed = time.perf_counter() - start_total
 

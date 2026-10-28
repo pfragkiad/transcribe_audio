@@ -24,6 +24,8 @@ packaging==26.3
 pathspec==1.1.1
 protobuf==7.36.2
 PyYAML==6.0.3
+pypinyin>=0.55,<1
+jieba==0.42.1
 setuptools==84.2.0
 tokenizers==0.23.3
 tqdm==4.70.1

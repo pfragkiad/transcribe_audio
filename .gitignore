@@ -1,0 +1,25 @@
+# Local Python environment and caches
+.venv/
+__pycache__/
+.cache/
+*.py[cod]
+
+# Local input data and generated output
+data/
+output/
+outputs/
+*.mp4
+*.mp3
+*.wav
+*.m4a
+*.flac
+*.ogg
+*.webm
+*.mkv
+*.mov
+*.avi
+*.aac
+*.srt
+*.vtt
+*.txt
+!requirements.txt
